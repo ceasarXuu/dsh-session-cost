@@ -1,0 +1,6 @@
+{
+  "meta": {
+    "title": "Session API Cost",
+    "description": "Inserts the current session's cumulative API cost into the composer usage line, between the token count and the cache-hit reading."
+  }
+}

@@ -1,0 +1,99 @@
+# Session API Cost — official DeepSeek price history and tariff windows.
+#
+# `prices` is history, not one flat table: each model keeps dated revisions of
+# OFF-PEAK prices per 1,000,000 tokens, copied from the official DeepSeek
+# "Models & Pricing" page (snapshot 2026-10-28; model ids match DSH's catalog).
+# The fold prices every sample with the revision in force at that request's own
+# timestamp, so old Sessions keep the old rates when the official page changes.
+# The plugin's own bounded auto check (see `autoCheck`) appends a new revision
+# when it detects changed official prices; it never edits this file.
+#
+# Peak = Beijing (UTC+8) Monday–Friday 09:00–12:00 and 14:00–18:00, excluding
+# Chinese statutory holidays; peak prices are exactly 2× these off-peak values.
+# Refresh `tariffs.holidays` yearly.
+#
+# Routes resolve by `provider/model` first, then `*/model`, then bare `model`.
+# A sample on an unpriced route contributes no money (the client shows the
+# token reading and marks the amount as unpriced) instead of guessing a rate.
+#
+# `autoCheck`: at most one official-page fetch per `intervalDays` (7). A
+# validated parse appends today's price revision when the official values
+# differ; a failed fetch is reported in the UI as "manual check may be needed".
+# `pricingUrls` selects the page per displayed currency.
+- insert:
+    - id: session-cost
+      name: '@ceasarxuu/dsh-session-cost'
+      config:
+        currency: CNY
+        pricesAsOf: '2026-10-28'
+        prices:
+          CNY:
+            deepseek-flash:
+              - from: '2026-10-28'
+                hit: 0.02
+                miss: 1
+                output: 4
+            deepseek-v4-pro:
+              - from: '2026-10-28'
+                hit: 0.15
+                miss: 4.5
+                output: 13.5
+          USD:
+            deepseek-flash:
+              - from: '2026-10-28'
+                hit: 0.003
+                miss: 0.15
+                output: 0.6
+            deepseek-v4-pro:
+              - from: '2026-10-28'
+                hit: 0.022
+                miss: 0.66
+                output: 1.98
+        autoCheck:
+          enabled: true
+          intervalDays: 7
+        pricingUrls:
+          CNY: 'https://api-docs.deepseek.com/zh-cn/quick_start/pricing/'
+          USD: 'https://api-docs.deepseek.com/quick_start/pricing/'
+        tariffs:
+          enabled: true
+          peakMultiplier: 2
+          utcOffsetMinutes: 480
+          peakWindows:
+            - '09:00-12:00'
+            - '14:00-18:00'
+          weekdays: [1, 2, 3, 4, 5]
+          holidays:
+            - '2026-01-01'
+            - '2026-01-02'
+            - '2026-01-03'
+            - '2026-02-15'
+            - '2026-02-16'
+            - '2026-02-17'
+            - '2026-02-18'
+            - '2026-02-19'
+            - '2026-02-20'
+            - '2026-02-21'
+            - '2026-02-22'
+            - '2026-02-23'
+            - '2026-04-04'
+            - '2026-04-05'
+            - '2026-04-06'
+            - '2026-05-01'
+            - '2026-05-02'
+            - '2026-05-03'
+            - '2026-05-04'
+            - '2026-05-05'
+            - '2026-06-19'
+            - '2026-06-20'
+            - '2026-06-21'
+            - '2026-09-25'
+            - '2026-09-26'
+            - '2026-09-27'
+            - '2026-10-01'
+            - '2026-10-02'
+            - '2026-10-03'
+            - '2026-10-04'
+            - '2026-10-05'
+            - '2026-10-06'
+            - '2026-10-07'

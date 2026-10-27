@@ -1,0 +1,68 @@
+{
+  "name": "@ceasarxuu/dsh-session-cost",
+  "version": "1.1.0",
+  "description": "Session API cost inside the DSH composer usage line: official token count, a ¥/$ amount from dated official prices (peak/off-peak aware), and cache-hit reading, with a bounded 7-day price-table auto-check.",
+  "type": "module",
+  "license": "MIT",
+  "author": "ceasarXuu",
+  "homepage": "https://github.com/ceasarXuu/dsh-session-cost#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/ceasarXuu/dsh-session-cost.git"
+  },
+  "bugs": {
+    "url": "https://github.com/ceasarXuu/dsh-session-cost/issues"
+  },
+  "keywords": [
+    "dsh",
+    "dsh-plugin",
+    "deepseek-harness",
+    "cost",
+    "usage",
+    "tokens",
+    "billing",
+    "pricing"
+  ],
+  "engines": {
+    "dsh": ">=0.2.1-rc.2 <0.3.0",
+    "node": ">=22"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "exports": {
+    ".": "./index.js",
+    "./client": "./client.js",
+    "./locale/*.json": "./locale/*.json",
+    "./icon": "./icon.svg"
+  },
+  "files": [
+    "index.js",
+    "client.js",
+    "prices.js",
+    "cordis.patch.yml",
+    "README.md",
+    "README.zh.md",
+    "LICENSE",
+    "THIRD_PARTY_NOTICES.md",
+    "locale/*.json",
+    "icon.svg",
+    "scripts/*.mjs",
+    "docs/price-refresh.md",
+    "docs/preview.png"
+  ],
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "platform": "web",
+      "immediately": true,
+      "inject": [
+        "@deepseek-ai/dsh-client-ui-conversation",
+        "@deepseek-ai/dsh-client-ui-chat",
+        "@deepseek-ai/dsh-client-locale"
+      ]
+    }
+  }
+}
