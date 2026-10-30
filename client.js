@@ -10,6 +10,20 @@
 // segment is plugin data: it arrives already folded and priced from the Host
 // half's `sessionCost` projection (`useProjection('sessionCost')`).
 //
+// Agent Teams: when the experimental Agent Teams bundle is enabled, the
+// conversation header renders the shipped team panel
+// (`@deepseek-ai/dsh-experimental-client-ui-agent-team`, a `[data-team-panel]`
+// portal). That component owns no sub-slots, so this plugin decorates the
+// shipped panel in place — a per-member cost reading at the right edge of every
+// roster card and the all-member total in the roster heading. The panel itself
+// stays the shipped one; only the two cost nodes are ours.
+//
+// Costs for teammates come from the same Host projection: each teammate is a
+// real Session, so `projectionsBySession[memberId].values.sessionCost` is its
+// cumulative cost. A teammate that is not open in a conversation has no live
+// projection frames, so the decorator asks the Session service to refresh every
+// member while the panel is open (see `refreshSessionProjections`).
+//
 // Harness client packages are intentionally not required (plugin practices:
 // copy markup/CSS/behavior instead); only `react`/`react-dom` from the
 // platform module table are used.
@@ -34,6 +48,17 @@ window.__ModuleLoader__.load({
     const PROJECTION_REFRESH_MS = 300_000
     let clientSessionsService = null
 
+    /**
+     * Agent Teams panel decoration. The shipped panel is a portal mounted
+     * directly under <body> and carries `data-team-panel`; the roster section
+     * holds one member card button per `agentTeam.members` entry in order.
+     */
+    const TEAM_PANEL_SELECTOR = '[data-team-panel]'
+    const TEAM_MEMBER_COST_ATTR = 'data-session-cost-member'
+    const TEAM_TOTAL_COST_ATTR = 'data-session-cost-total'
+    /** While the panel is open, re-read inactive teammates' projections slowly. */
+    const TEAM_PROJECTION_REFRESH_MS = 15_000
+
     async function refreshSessionProjections(sessionId) {
       try {
         const service = clientSessionsService
@@ -42,6 +67,16 @@ window.__ModuleLoader__.load({
         await service.refreshProjections(sessionId)
       } catch (_refreshFailed) {
         /* the next tick retries */
+      }
+    }
+
+    /** Refresh every member Session of one team (the Lead included). */
+    function refreshTeamProjections(members) {
+      if (!Array.isArray(members)) return
+      for (const member of members) {
+        if (member !== null && typeof member === 'object' && typeof member.id === 'string' && member.id.length > 0) {
+          void refreshSessionProjections(member.id)
+        }
       }
     }
 
@@ -180,6 +215,199 @@ window.__ModuleLoader__.load({
 
     function checkFailedOf(cost) {
       return cost !== undefined && cost !== null && cost.checkStatus === CHECK_FAILED
+    }
+
+    /* ------------------------------------------------------------------ */
+    /* 2c. Agent Teams roster costs — one `sessionCost` view per member.     */
+    /* ------------------------------------------------------------------ */
+
+    /**
+     * One Session's live `sessionCost` view from the shared projection map.
+     * @param projectionsBySession - `useSessions` projection block.
+     * @param sessionId - member Session id (`agentTeam.members[].id`).
+     * @returns the view, or null when this Session has no usable cost yet.
+     */
+    function sessionCostOf(projectionsBySession, sessionId) {
+      if (typeof sessionId !== 'string' || sessionId.length === 0) return null
+      const values = projectionsBySession?.[sessionId]?.values
+      const cost = values?.sessionCost
+      if (cost === null || typeof cost !== 'object') return null
+      if (typeof cost.costNano !== 'number' || !Number.isFinite(cost.costNano) || cost.costNano < 0) return null
+      return cost
+    }
+
+    /**
+     * The team reading for one member Session: its child-owned cost. The host
+     * view separates a fork's inherited prefix (`costNano`) from usage the
+     * member produced itself (`ownCostNano`); teams use the latter so a forked
+     * teammate never re-bills the Lead's prefix in the total. An older host
+     * without the split falls back to the whole-log amount.
+     * @param projectionsBySession - shared projection map.
+     * @param sessionId - member Session id.
+     * @returns `{ costNano, unpriced, currency, checkStatus, inheritedCostNano }` or null.
+     */
+    function teamMemberCostOf(projectionsBySession, sessionId) {
+      const raw = sessionCostOf(projectionsBySession, sessionId)
+      if (raw === null) return null
+      const hasOwn = typeof raw.ownCostNano === 'number' && Number.isFinite(raw.ownCostNano) && raw.ownCostNano >= 0
+      const costNano = hasOwn ? raw.ownCostNano : raw.costNano
+      const ownUnpricedTokens = typeof raw.ownUnpricedTokens === 'number'
+        && Number.isFinite(raw.ownUnpricedTokens) && raw.ownUnpricedTokens >= 0
+        ? raw.ownUnpricedTokens
+        : (raw.unpriced === true ? 1 : 0)
+      return {
+        costNano,
+        unpriced: ownUnpricedTokens > 0,
+        ownUnpricedTokens,
+        currency: raw.currency,
+        checkStatus: raw.checkStatus,
+        inheritedCostNano: Math.max(0, raw.costNano - costNano),
+      }
+    }
+
+    /**
+     * Sum the team's member Sessions (the Lead is `members[0]`). A member whose
+     * view has not arrived is counted as unknown; a member priced in another
+     * currency is left out of the sum so currencies are never mixed.
+     * @param members - `agentTeam.members` view rows.
+     * @param projectionsBySession - shared projection map.
+     * @returns rows in roster order plus the aggregate.
+     */
+    function summarizeTeamCosts(members, projectionsBySession) {
+      const rows = []
+      const list = Array.isArray(members) ? members : []
+      let currency = null
+      let costNano = 0
+      let unpriced = false
+      let priced = 0
+      for (const member of list) {
+        const cost = teamMemberCostOf(projectionsBySession, member?.id)
+        rows.push({ member, cost })
+        if (cost === null) continue
+        const memberCurrency = typeof cost.currency === 'string' && cost.currency.length > 0 ? cost.currency : 'CNY'
+        if (currency === null) currency = memberCurrency
+        if (memberCurrency !== currency) continue
+        costNano += cost.costNano
+        unpriced = unpriced || cost.unpriced === true
+        priced += 1
+      }
+      return {
+        rows,
+        currency: currency ?? 'CNY',
+        costNano,
+        unpriced,
+        priced,
+        total: rows.length,
+        complete: rows.length > 0 && priced === rows.length,
+      }
+    }
+
+    /** Compact one-member money reading: `¥0`, `≈¥0.012`, `<¥0.001`. */
+    function teamCostLabel(cost) {
+      if (cost === null) return null
+      return `${cost.unpriced === true ? '≈' : ''}${formatCost(cost.costNano, cost.currency)}`
+    }
+
+    /** Roster-heading total; `≈` marks a partial or unpriced team reading. */
+    function teamTotalLabel(summary, t) {
+      if (summary.priced === 0) return null
+      const approximate = summary.complete === false || summary.unpriced === true
+      return t('team.total', { cost: `${approximate ? '≈' : ''}${formatCost(summary.costNano, summary.currency)}` })
+    }
+
+    /** Hover text carrying the exact amount and the price-table caveats. */
+    function teamCostTitle(name, cost, t) {
+      if (cost === null) return ''
+      const exact = `${cost.unpriced === true ? '≈' : ''}${formatExactCost(cost.costNano, cost.currency)}`
+      const label = name === null ? t('team.totalTitle') : t('team.memberTitle', { name })
+      const parts = [`${label}: ${exact}`]
+      if (cost.inheritedCostNano > 0) {
+        parts.push(t('team.inheritedHint', {
+          total: formatExactCost(cost.costNano + cost.inheritedCostNano, cost.currency),
+        }))
+      }
+      if (cost.unpriced === true) parts.push(t('cost.unpricedHint'))
+      if (cost.checkStatus === CHECK_FAILED) parts.push(t('cost.checkWarnHint'))
+      return parts.join(' ')
+    }
+
+    /** Hover text for the all-member total, with the same caveats. */
+    function teamTotalTitle(summary, t) {
+      if (summary.priced === 0) return ''
+      const approximate = summary.complete === false || summary.unpriced === true
+      const exact = `${approximate ? '≈' : ''}${formatExactCost(summary.costNano, summary.currency)}`
+      const parts = [`${t('team.totalTitle')}: ${exact}`]
+      if (summary.unpriced === true) parts.push(t('cost.unpricedHint'))
+      return parts.join(' ')
+    }
+
+    /**
+     * Ensure the shipped roster section carries exactly one cost node per
+     * member card and one total node in its heading. Idempotent: a React
+     * re-render or a repeated sweep only refreshes text and titles, never
+     * accumulates copies.
+     * @param section - roster `<section>` inside the shipped team panel.
+     * @param summary - result of `summarizeTeamCosts`.
+     * @param t - locale lookup from this plugin's namespace.
+     */
+    function updateTeamCostNodes(section, summary, t) {
+      const doc = section.ownerDocument
+      if (doc === null || doc === undefined) return
+      const heading = section.querySelector('h3')
+      if (heading !== null) {
+        const total = teamTotalLabel(summary, t)
+        let node = heading.querySelector(`:scope > [${TEAM_TOTAL_COST_ATTR}]`)
+        if (total === null) {
+          if (node !== null) node.remove()
+        } else {
+          if (node === null) {
+            node = doc.createElement('span')
+            node.className = 'scp-team-total'
+            node.setAttribute(TEAM_TOTAL_COST_ATTR, '')
+            heading.appendChild(node)
+          }
+          if (node.textContent !== total) node.textContent = total
+          const title = teamTotalTitle(summary, t)
+          if (node.title !== title) node.title = title
+        }
+      }
+      const roster = section.querySelector(':scope > div')
+      const buttons = roster === null
+        ? section.querySelectorAll('button')
+        : roster.querySelectorAll(':scope > button')
+      for (let index = 0; index < buttons.length; index += 1) {
+        const button = buttons[index]
+        const row = summary.rows[index]
+        const cost = row === undefined ? null : row.cost
+        const member = row === undefined ? null : row.member
+        const name = member !== null && typeof member.name === 'string' && member.name.length > 0 ? member.name : null
+        // Never label a card with another member's amount: the shipped roster
+        // card starts its text with the member name (unique within a team).
+        if (name !== null && !String(button.textContent ?? '').startsWith(name)) continue
+        const label = teamCostLabel(cost)
+        let node = button.querySelector(`:scope > [${TEAM_MEMBER_COST_ATTR}]`)
+        if (label === null) {
+          if (node !== null) node.remove()
+          continue
+        }
+        if (node === null) {
+          node = doc.createElement('span')
+          node.className = 'scp-team-cost'
+          node.setAttribute(TEAM_MEMBER_COST_ATTR, '')
+          button.appendChild(node)
+        }
+        if (node.textContent !== label) node.textContent = label
+        const memberId = member !== null && typeof member.id === 'string' ? member.id : ''
+        if (node.getAttribute(TEAM_MEMBER_COST_ATTR) !== memberId) node.setAttribute(TEAM_MEMBER_COST_ATTR, memberId)
+        const title = teamCostTitle(name, cost, t)
+        if (node.title !== title) node.title = title
+      }
+    }
+
+    /** Remove every cost node this plugin has attached to a team panel. */
+    function clearTeamCostNodes(doc) {
+      if (doc === null || doc === undefined) return
+      for (const node of doc.querySelectorAll(`[${TEAM_MEMBER_COST_ATTR}], [${TEAM_TOTAL_COST_ATTR}]`)) node.remove()
     }
 
     /* ------------------------------------------------------------------ */
@@ -490,6 +718,128 @@ window.__ModuleLoader__.load({
     }
 
     /* ------------------------------------------------------------------ */
+    /* 6b. Agent Teams panel decoration — the shipped panel is a portal, so */
+    /*     this header cell only observes and injects the cost readings.    */
+    /* ------------------------------------------------------------------ */
+
+    /**
+     * Headless header cell: reads the Lead Session's `agentTeam` view and every
+     * member's `sessionCost` view, then decorates the open shipped panel. It
+     * renders nothing of its own, so the shipped header action is unchanged.
+     * @param props - standard session kit plus this plugin's locale seat.
+     */
+    function TeamCostPanel({ sessionId, useSession, useSessions, t }) {
+      // A teammate conversation decorates its Lead's team, exactly like the
+      // shipped panel; a Lead conversation decorates its own.
+      const leadSessionId = useSession(snapshot => snapshot?.subagent?.address?.parentSessionId) ?? sessionId
+      const team = useSessions(state => state.projectionsBySession?.[leadSessionId]?.values?.agentTeam)
+      const projectionsBySession = useSessions(state => state.projectionsBySession)
+      const members = Array.isArray(team?.members) ? team.members : null
+      const summary = members === null ? null : summarizeTeamCosts(members, projectionsBySession)
+      const membersKey = members === null ? '' : members.map(member => member.id).join('|')
+      const live = useRef({ members, summary, t })
+      live.current = { members, summary, t }
+      const scheduleRef = useRef(null)
+      const refreshRef = useRef(() => {})
+      refreshRef.current = () => { refreshTeamProjections(live.current.members) }
+
+      // A teammate that is not open in a conversation has no live projection
+      // frames; read every member's view once the member set is known.
+      useEffect(() => {
+        if (membersKey === '') return
+        refreshRef.current()
+      }, [membersKey])
+
+      // The shipped panel mounts on <body> only while open, so watch the body
+      // for the portal and the panel for roster changes, then decorate in place.
+      useEffect(() => {
+        if (membersKey === '') return undefined
+        let disposed = false
+        let frame = 0
+        let panelObserver = null
+        let observedPanel = null
+        let timer = null
+        let open = false
+
+        const stopTimer = () => {
+          if (timer === null) return
+          window.clearInterval(timer)
+          timer = null
+        }
+        const startTimer = () => {
+          if (timer !== null) return
+          timer = window.setInterval(() => refreshRef.current(), TEAM_PROJECTION_REFRESH_MS)
+        }
+        const sweep = () => {
+          frame = 0
+          if (disposed) return
+          const panel = document.querySelector(TEAM_PANEL_SELECTOR)
+          if (panel === null) {
+            if (open) {
+              open = false
+              stopTimer()
+            }
+            if (observedPanel !== null) {
+              panelObserver?.disconnect()
+              panelObserver = null
+              observedPanel = null
+            }
+            return
+          }
+          if (panel !== observedPanel) {
+            panelObserver?.disconnect()
+            observedPanel = panel
+            panelObserver = new MutationObserver(schedule)
+            panelObserver.observe(panel, { childList: true, subtree: true })
+          }
+          const current = live.current
+          if (current.summary !== null) {
+            const section = panel.querySelector('section')
+            if (section !== null) updateTeamCostNodes(section, current.summary, current.t)
+          }
+          if (!open) {
+            open = true
+            refreshRef.current()
+            startTimer()
+          }
+        }
+        const schedule = () => {
+          if (disposed || frame !== 0) return
+          frame = window.requestAnimationFrame(sweep)
+        }
+        const observer = new MutationObserver(schedule)
+        observer.observe(document.body, { childList: true })
+        scheduleRef.current = schedule
+        schedule()
+        return () => {
+          disposed = true
+          scheduleRef.current = null
+          if (frame !== 0) window.cancelAnimationFrame(frame)
+          observer.disconnect()
+          panelObserver?.disconnect()
+          stopTimer()
+          clearTeamCostNodes(document)
+        }
+      }, [sessionId, membersKey === ''])
+
+      // Projection/store renders (a cost arriving, a member changing state)
+      // re-read the open panel; the rAF gate keeps streaming DOM updates cheap.
+      useEffect(() => { scheduleRef.current?.() })
+
+      return null
+    }
+
+    /**
+     * Guard the hook cell: a DSH release without the session seats must keep
+     * loading (the composer pill still works); the check runs before the hook
+     * component mounts so hook order stays stable.
+     */
+    function TeamCostCell(props) {
+      if (typeof props.useSession !== 'function' || typeof props.useSessions !== 'function') return null
+      return h(TeamCostPanel, props)
+    }
+
+    /* ------------------------------------------------------------------ */
     /* 7. Performance-usage detail mode (best effort).                     */
     /*    Profile ships `performanceUsage: detailed`; when the client       */
     /*    settings service is reachable we follow the live preference.     */
@@ -744,6 +1094,28 @@ button.scp-pill[aria-expanded='true'] {
   color: var(--dsw-alias-state-warn-primary, #d97706);
   font-weight: 600;
 }
+/* Agent Teams roster decoration: one cost reading per member card (flex third
+   child, right aligned) and the all-member total in the roster heading. */
+.scp-team-cost {
+  flex: none;
+  align-self: center;
+  margin-left: auto;
+  padding-left: 6px;
+  color: var(--dsw-alias-label-tertiary);
+  font-size: 11px;
+  line-height: 16px;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+.scp-team-total {
+  margin-left: auto;
+  color: var(--dsw-alias-label-tertiary);
+  font-size: 12px;
+  font-weight: 400;
+  line-height: 16px;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
 /* Frame-wide dismissible notice: the overlay layer is click-through, so the
    card re-enables pointer events for its own box. */
 .scp-notice {
@@ -830,6 +1202,10 @@ button.scp-pill[aria-expanded='true'] {
       'cost.noticeTitle': '会话 API 消费：价目表待核对',
       'cost.noticeBody': '官方价目表自动检查失败（{time}），金额可能已过期，请手动核对。',
       'cost.noticeDismiss': '知道了',
+      'team.total': '合计 {cost}',
+      'team.totalTitle': '全部成员累计 API 消费（估算）',
+      'team.memberTitle': '{name} 的累计 API 消费（估算）',
+      'team.inheritedHint': '（另有 {total} 为从 Lead 继承的历史，不计入团队合计）',
     }
 
     const en = {
@@ -858,6 +1234,10 @@ button.scp-pill[aria-expanded='true'] {
       'cost.noticeTitle': 'Session API cost: price table needs review',
       'cost.noticeBody': 'The official price-table auto-check failed ({time}); the amount may be stale — please check manually.',
       'cost.noticeDismiss': 'Dismiss',
+      'team.total': 'Total {cost}',
+      'team.totalTitle': 'Cumulative API cost of all members (estimate)',
+      'team.memberTitle': '{name} cumulative API cost (estimate)',
+      'team.inheritedHint': '({total} inherited from the Lead is excluded from the team total)',
     }
 
     /* ------------------------------------------------------------------ */
@@ -866,7 +1246,7 @@ button.scp-pill[aria-expanded='true'] {
 
     function apply(ctx) {
       try {
-        clientSessionsService = ctx.get('sessions') ?? null
+        clientSessionsService = ctx.sessions ?? ctx.get('sessions') ?? null
       } catch (_unavailableSessions) {
         clientSessionsService = null
       }
@@ -892,6 +1272,15 @@ button.scp-pill[aria-expanded='true'] {
         priority: -1, // a static bundle must shadow explicitly; lowest rank renders
         locale: NS, // synthesizes the `t` prop from our dictionaries
       }, UsageCostPill))
+      // Agent Teams: an additive headless cell next to the shipped team action.
+      // It decorates the shipped panel in place instead of shadowing it, so the
+      // roster, task board and teammate navigation keep their own behavior.
+      ctx.slots.inject('conversation.session.header.actions', () => ctx.slots.register({
+        name: 'conversation.session.header.actions',
+        id: 'session-cost-team',
+        order: -19, // right after the shipped agent-team action (order -20)
+        locale: NS,
+      }, TeamCostCell))
       // Frame-wide, non-blocking notice when the bounded official-page check
       // failed; a fresh id keeps it additive beside the shipped overlays.
       ctx.slots.inject('shell.overlay', () => ctx.slots.register({
@@ -902,6 +1291,23 @@ button.scp-pill[aria-expanded='true'] {
       }, PriceCheckNotice))
     }
 
-    return { inject: ['slots', 'locale'], apply }
+    const exports = { inject: ['slots', 'locale', 'sessions'], apply }
+    // Offline test harness seam: the pure team-cost helpers are exercised by
+    // test/client-team.test.mjs without a browser; production exports stay the
+    // two module-loader contracts above.
+    if (typeof window !== 'undefined' && window.__SESSION_COST_TEST__ === true) {
+      exports.__test = {
+        sessionCostOf,
+        teamMemberCostOf,
+        summarizeTeamCosts,
+        teamCostLabel,
+        teamTotalLabel,
+        teamCostTitle,
+        teamTotalTitle,
+        updateTeamCostNodes,
+        clearTeamCostNodes,
+      }
+    }
+    return exports
   },
 })

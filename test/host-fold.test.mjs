@@ -234,3 +234,49 @@ rmSync(dir, { recursive: true, force: true })
     await new Promise(resolve => server.close(resolve))
   }
 }
+
+// 12. A fork-inherited prefix stays in the whole-log cost but not in ownCostNano.
+//     The composer keeps showing the whole-log amount; team aggregation uses the
+//     child-owned portion so the parent and child do not double count the prefix.
+{
+  const { ctx, registrations } = harness()
+  host.apply(ctx, { ...BASE_CONFIG, statePath: join(dir, 'unused3.json'), autoCheck: { enabled: false } })
+  const def = registrations[0]
+  const T = Date.parse('2026-10-26T18:00:00.000Z') // Monday 02:00 Beijing (off-peak)
+  const fold = (state, events) => { for (const event of events) state = def.apply(state, event); return state }
+  const header = ev(0, 'request/header', { header: { config: { provider: 'deepseek-account', model: 'deepseek-flash' } } }, T)
+  const step1 = ev(1, 'step/start', { turn: 1, step: 1 }, T)
+  const inheritedSample = ev(2, 'assistant/message', {
+    turn: 1, step: 1,
+    message: { source: { kind: 'model', provider: 'deepseek-account', model: 'deepseek-flash' } },
+    stream: [], usage: { inputTokens: 1_000_000, outputTokens: 0 },
+  }, T + 1000)
+  const step2 = ev(3, 'step/start', { turn: 2, step: 1 }, T + 2000)
+  const ownSample = ev(4, 'assistant/message', {
+    turn: 2, step: 1,
+    message: { source: { kind: 'model', provider: 'deepseek-account', model: 'deepseek-flash' } },
+    stream: [], usage: { inputTokens: 1_000_000, outputTokens: 0 },
+  }, T + 3000)
+  const events = [header, step1, inheritedSample, step2, ownSample]
+
+  // 3 inherited events (seq 0,1,2): whole-log ¥1, child-owned ¥0.5.
+  const forked = def.wire.view(fold(def.init({}, 3), events))
+  console.log('12a. fork split:', forked.costNano === 1_000_000_000 && forked.ownCostNano === 500_000_000,
+    'total=¥' + forked.costNano / 1e9, 'own=¥' + forked.ownCostNano / 1e9)
+
+  // No inheritance: the own portion equals the whole-log amount.
+  const fresh = def.wire.view(fold(def.init({}, 0), events))
+  console.log('12b. fresh own==total:', fresh.costNano === 1_000_000_000 && fresh.ownCostNano === 1_000_000_000)
+
+  // A live replacement only replaces the child-owned sample.
+  const replaced = def.wire.view(fold(def.init({}, 3), [
+    ...events,
+    { seq: 5, type: 'assistant/message', time: T + 4000, data: {
+      turn: 2, step: 1,
+      message: { source: { kind: 'model', provider: 'deepseek-account', model: 'deepseek-flash' } },
+      stream: [], usage: { inputTokens: 2_000_000, outputTokens: 0 },
+    } },
+  ]))
+  console.log('12c. live replacement:', replaced.costNano === 1_500_000_000 && replaced.ownCostNano === 1_000_000_000,
+    'total=¥' + replaced.costNano / 1e9, 'own=¥' + replaced.ownCostNano / 1e9)
+}

@@ -19,6 +19,7 @@ npm version patch --no-git-tag-version     # or minor/major
 # 2. Tests and packed file list
 node test/prices.test.mjs
 node test/host-fold.test.mjs
+node test/client-team.test.mjs
 node --check index.js && node --check client.js
 npm pack --dry-run                         # confirm files, size, and that no private data is included
 
@@ -37,6 +38,9 @@ Post-publish checks:
 - On a clean DSH profile: Plugin Manager → Add → `@ceasarxuu/dsh-session-cost`, or
   `dsh plugin --profile smoke add @ceasarxuu/dsh-session-cost`. The composer pill must show the cost
   segment, and `~/.dsh/plugin-data/session-cost/price-state.json` must appear after the first check.
+- On a profile that includes `@deepseek-ai/dsh-experimental-agent-team-profile`, open a team session:
+  every roster card shows an amount and the `成员 N` heading shows the team total; the panel's
+  roster/task/navigation behavior is unchanged.
 - Check the Plugin Manager card: localized title/description (`locale/en.json`, `locale/zh.json`) and
   the icon.
 - If this release changes `engine.dsh`, re-run the install smoke test on the oldest supported DSH
@@ -48,8 +52,13 @@ Post-publish checks:
   running the plugin on the older version; narrow it when a DSH API change breaks the fold, the
   composer slot, locale registration, or session-list projections.
 - The plugin intentionally uses only public DSH runtime seams (session projections with a wire view,
-  slot shadowing, locale registration, session-list projections). If an upstream change removes one,
-  bump the minor version and state the tested DSH version in the README.
+  slot shadowing, locale registration, session-list projections) plus the Agent Teams panel's
+  `data-team-panel` DOM contract. If an upstream change removes one, bump the minor version and state
+  the tested DSH version in the README.
+- On every DSH bump, re-run the Agent Teams panel check: open a team session, confirm the per-card
+  amounts and the heading total still render, and confirm the panel's roster, task board and
+  teammate navigation still work. A changed roster markup needs a plugin update even when the
+  composer pill keeps working.
 
 ## Plugin market index (optional)
 

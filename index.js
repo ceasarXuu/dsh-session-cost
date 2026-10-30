@@ -12,6 +12,13 @@
  * once-per-interval check) so that sessions before the change keep their old
  * rates and later sessions use the new ones.
  *
+ * Fork split: a Session created by forking another carries a copied prefix of
+ * the parent's events (`init` receives the exact `inheritedEventCount`). The
+ * wire view exposes both the whole-log `costNano` (the composer's cumulative
+ * reading, unchanged) and `ownCostNano` / `ownUnpricedTokens`, which count only
+ * events at or past that cut. The Agent Teams roster sums the own portion so a
+ * forked teammate never re-bills the Lead's prefix in the team total.
+ *
  * Auto check: at most once per `autoCheck.intervalDays` (7 by default) the
  * host fetches the official pricing page through `prices.js`, validates the
  * table fail-closed, and — only when the parsed current prices differ from the
@@ -66,6 +73,15 @@ const stateSchema = guard((value) => {
   if (!isInteger(value.unpricedTokens, 0)) {
     throw new Error('sessionCost state unpricedTokens must be a non-negative integer')
   }
+  if (!isInteger(value.inheritedCut, 0)) {
+    throw new Error('sessionCost state inheritedCut must be a non-negative integer')
+  }
+  if (!Number.isFinite(value.ownCostNano) || value.ownCostNano < 0) {
+    throw new Error('sessionCost state ownCostNano must be a non-negative number')
+  }
+  if (!isInteger(value.ownUnpricedTokens, 0)) {
+    throw new Error('sessionCost state ownUnpricedTokens must be a non-negative integer')
+  }
   if (value.route !== null
     && !(isRecord(value.route)
       && typeof value.route.provider === 'string'
@@ -82,7 +98,8 @@ const stateSchema = guard((value) => {
       || !isInteger(last.step, 0)
       || !isRecord(last.buckets)
       || !Number.isFinite(last.costNano) || last.costNano < 0
-      || !isInteger(last.unpricedTokens, 0)) {
+      || !isInteger(last.unpricedTokens, 0)
+      || typeof last.own !== 'boolean') {
       throw new Error('sessionCost state last must be null or a replacement slot')
     }
   }
@@ -91,15 +108,17 @@ const stateSchema = guard((value) => {
 const viewSchema = guard((value) => {
   if (!isRecord(value)
     || !Number.isFinite(value.costNano) || value.costNano < 0
+    || !Number.isFinite(value.ownCostNano) || value.ownCostNano < 0
     || typeof value.currency !== 'string'
     || typeof value.unpriced !== 'boolean'
     || !isInteger(value.unpricedTokens, 0)
+    || !isInteger(value.ownUnpricedTokens, 0)
     || !isInteger(value.checkStatus, 0)
     || (value.priceAsOf !== null && typeof value.priceAsOf !== 'string')
     || (value.priceRevisionAt !== null && typeof value.priceRevisionAt !== 'string')
     || (value.priceCheckedAt !== null && !Number.isFinite(value.priceCheckedAt))
     || (value.priceCheckError !== null && typeof value.priceCheckError !== 'string')) {
-    throw new Error('sessionCost view must be { costNano, currency, unpriced, unpricedTokens, checkStatus, priceAsOf, priceRevisionAt, priceCheckedAt, priceCheckError }')
+    throw new Error('sessionCost view must be { costNano, ownCostNano, currency, unpriced, unpricedTokens, ownUnpricedTokens, checkStatus, priceAsOf, priceRevisionAt, priceCheckedAt, priceCheckError }')
   }
 })
 
@@ -554,11 +573,17 @@ function defineProjection(economy, status) {
     return { costNano: Math.round(costNano), unpricedTokens: 0 }
   }
 
-  const init = () => ({
+  const init = (_header, inheritedEventCount) => ({
     route: null,
     stepStartTime: null,
+    // The fork-inherited prefix is billed in the parent Session. It stays in
+    // `costNano` (the composer's whole-log reading) but not in `ownCostNano`,
+    // so summing member Session cost for a team never counts it twice.
+    inheritedCut: isInteger(inheritedEventCount, 0) ? inheritedEventCount : 0,
     costNano: 0,
     unpricedTokens: 0,
+    ownCostNano: 0,
+    ownUnpricedTokens: 0,
     last: null,
   })
 
@@ -610,13 +635,23 @@ function defineProjection(economy, status) {
         : state.route
       const timestamp = state.stepStartTime ?? event.time
       const sample = priceSample(buckets, route, timestamp)
+      // A sample at or past the inherited cut is child-owned usage; an earlier
+      // seq is the fork prefix copied from the parent log.
+      const own = !(Number.isInteger(event.seq) && event.seq < state.inheritedCut)
 
       const costNano = state.costNano - (previous?.costNano ?? 0) + sample.costNano
       const unpricedTokens = state.unpricedTokens - (previous?.unpricedTokens ?? 0) + sample.unpricedTokens
-      const last = { turn, step, buckets, costNano: sample.costNano, unpricedTokens: sample.unpricedTokens }
-      return costNano === state.costNano && unpricedTokens === state.unpricedTokens
+      const previousOwnCost = previous !== null && previous.own === true ? previous.costNano : 0
+      const previousOwnUnpriced = previous !== null && previous.own === true ? previous.unpricedTokens : 0
+      const ownCostNano = state.ownCostNano - previousOwnCost + (own ? sample.costNano : 0)
+      const ownUnpricedTokens = state.ownUnpricedTokens - previousOwnUnpriced + (own ? sample.unpricedTokens : 0)
+      const last = { turn, step, buckets, costNano: sample.costNano, unpricedTokens: sample.unpricedTokens, own }
+      return costNano === state.costNano
+        && unpricedTokens === state.unpricedTokens
+        && ownCostNano === state.ownCostNano
+        && ownUnpricedTokens === state.ownUnpricedTokens
         ? { ...state, last }
-        : { ...state, costNano, unpricedTokens, last }
+        : { ...state, costNano, unpricedTokens, ownCostNano, ownUnpricedTokens, last }
     } catch (_malformedEvent) {
       return state
     }
@@ -624,7 +659,9 @@ function defineProjection(economy, status) {
 
   return {
     key: 'sessionCost',
-    stateVersion: 2,
+    // 3 adds the fork-own split (`ownCostNano` / `ownUnpricedTokens`); the bump
+    // discards v2 checkpoints so every fold carries the new fields.
+    stateVersion: 3,
     stateSchema,
     init,
     apply,
@@ -632,9 +669,11 @@ function defineProjection(economy, status) {
       viewSchema,
       view: (state) => ({
         costNano: state.costNano,
+        ownCostNano: state.ownCostNano,
         currency: economy.currency,
         unpriced: state.unpricedTokens > 0,
         unpricedTokens: state.unpricedTokens,
+        ownUnpricedTokens: state.ownUnpricedTokens,
         checkStatus: status.lastCheckOk === true
           ? CHECK_OK
           : status.lastCheckOk === false ? CHECK_FAILED : CHECK_NEVER,

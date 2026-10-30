@@ -1,7 +1,8 @@
 # dsh-session-cost
 
-**Session API cost inside the DSH composer usage line.** It keeps the official token count and
-cache-hit reading byte-identical to the shipped pill and inserts the money segment between them:
+**Session API cost inside the DSH composer usage line — and inside the Agent Teams roster.** It
+keeps the official token count and cache-hit reading byte-identical to the shipped pill and inserts
+the money segment between them:
 
 ```
 ⟳ 3 turns 237 steps · 205 tok/s    🗄 122K tok · ¥0.003 · 缓存命中 98%    ◔ 47%
@@ -14,6 +15,26 @@ The token dialog keeps its shipped rows and adds **消费金额** (cost), **价�
 snapshot / newest applied revision) and **价目自动检查** (last official-page check). A failed check
 marks the amount with `!` and shows a dismissible notice.
 
+### Agent Teams roster
+
+When the experimental Agent Teams bundle is enabled
+(`@deepseek-ai/dsh-experimental-agent-team-profile`), the same plugin also annotates the shipped
+conversation-header team panel, without replacing it:
+
+- every roster card shows that member Session's own cumulative API cost at its right edge;
+- the roster heading (`成员 N`) shows the sum over every member, the Lead included.
+
+Costs for teammates are read from each teammate Session's own `sessionCost` projection, so the Lead
+amount and every helper amount are independent bills. A **forked** teammate inherits a copy of the
+Lead's completed history; its card shows only the cost the member itself produced, and the inherited
+prefix is excluded from the team total (the card's hover text reports the excluded amount) so the
+Lead's earlier spend is never counted twice. A teammate whose conversation is not open has no live
+projection frames; the plugin asks the Session service to refresh all member projections when the
+panel opens and every 15 seconds while it stays open. An unknown or differently-priced member is
+excluded from the sum and the total is marked `≈`; hovering a reading shows the exact amount and any
+price-table caveat. The integration targets the 0.2.1-rc.5 experimental panel; a DSH build without
+that panel simply never shows the decoration.
+
 > This is a third-party plugin. It is not an official DeepSeek / DeepSeek Harness component.
 > The amount is a **token cost** (official billed tokens × official published prices) — a lower
 > bound of real spend, not an official invoice.
@@ -21,8 +42,9 @@ marks the amount with `!` and shows a dismissible notice.
 ## Install
 
 Requires **DSH 0.2.1-rc.2 or newer (below 0.3.0)** with the Web/Desktop surface, and Node ≥ 22.
-Verified on DSH 0.2.1-rc.3; the DSH 0.2.1-rc.2 API surface was checked statically (projection wire
-views, slot shadowing, locale registration, session-list projections).
+Verified on DSH 0.2.1-rc.5, including a live run with the experimental Agent Teams profile; the
+DSH 0.2.1-rc.2 API surface was checked statically (projection wire views, slot shadowing, locale
+registration, session-list projections).
 
 - **Plugin Manager:** Plugins → Add → `@ceasarxuu/dsh-session-cost` → install and keep it enabled.
 - **CLI:** `dsh plugin --profile <profile> add @ceasarxuu/dsh-session-cost`
@@ -38,9 +60,14 @@ unchanged. `plugin_manager` `install_bundle` accepts the same package name/spec.
 | `<n> tok` | the official `tokenUsage` session projection (unchanged) |
 | `¥0.003` / `$0.16` | this plugin: the same billed token buckets × official prices, per request |
 | `缓存命中 98%` | the official cache-hit rule (unchanged, including the never-round-to-100% behavior) |
+| team card `¥0.18` | this plugin: that member Session's child-owned `sessionCost` portion |
+| team heading `合计 ¥0.42` | this plugin: Σ child-owned cost over `agentTeam.members` (Lead included) |
 
 The money segment hides itself when no price is configured for the route (for example a
-third-party provider); the dialog then says “未配置价格” instead of inventing a number.
+third-party provider); the dialog then says “未配置价格” instead of inventing a number. A gateway
+that renames the model (for example `opencode-go/deepseek-v4.1-flash` while the official API id is
+`deepseek-flash`) stays unpriced until you add a matching row — `*/deepseek-v4.1-flash` resolves any
+provider's model with that id.
 
 ## How the amount is computed
 
@@ -66,7 +93,20 @@ official `tokenUsage` unit folds (`assistant/message` / `assistant/attempt` usag
   `reasoningTokens` are already inside `outputTokens`; `totalTokens` is ignored (the buckets are
   disjoint).
 
-The result is session-cumulative over the whole durable log, including fork-inherited prefixes.
+The result is session-cumulative over the whole durable log, including fork-inherited prefixes. The
+wire view also carries the child-owned split (`ownCostNano` / `ownUnpricedTokens`), which counts only
+events at or past the fork's inherited cut (`init(header, inheritedEventCount)`).
+
+For an Agent Team, every member (the Lead included) is its own durable Session with its own log, so
+the team total is the sum of every member's child-owned cost. A forked teammate's inherited prefix is
+kept out of that sum, which is why the card on a fork reports the member's own amount and its hover
+text names the excluded inherited total. The plugin reads the shipped `agentTeam` projection
+(`members[].id`) and the Session store's `projectionsBySession`; it adds no Team RPC and never
+re-allocates the Lead's tokens.
+
+> While a teammate Session is not open, its projection value is only as fresh as the last refresh.
+> The roster decoration refreshes all members when the panel opens and every 15 seconds while it is
+> open; closing the panel leaves the last known amount, and the next open refreshes it again.
 
 ## Price updates and the auto check
 
@@ -133,10 +173,19 @@ Routes resolve by `provider/model`, then `*/model`, then bare `model`.
 - **Peak windows / holidays are manual** (yearly refresh). A peak-multiplier change is detected and
   reported for manual review.
 - **Unpriced routes** (third-party providers without official prices) show the token reading and a
-  `≈`/“未配置价格” marker.
+  `≈`/“未配置价格” marker. Team member and total readings inherit the same marker.
+- **Forked teammates:** a fork's inherited prefix is excluded from its roster amount and from the
+  team total (hover shows the excluded inherited amount). Opening that teammate's own conversation
+  still shows its whole-log cumulative amount in the composer pill, because that reading is defined
+  over the full durable log.
+- **Agent Teams decoration is DOM-based.** The shipped team panel exposes no sub-slot, so the
+  plugin attaches its two cost nodes to the panel's roster section (`[data-team-panel]`). A DSH
+  release that renames that attribute or restructures the roster needs a plugin update; the panel's
+  own roster, task board and teammate navigation are untouched, and the composer pill is unaffected.
 - **DSH internal APIs:** this plugin relies on session projections, slot shadowing, locale
-  registration and session-list projections. It is version-gated by `engines.dsh`; a DSH upgrade
-  below 0.3.0 future-versions may still require an update.
+  registration, session-list projections and the Agent Teams panel's DOM contract. It is
+  version-gated by `engines.dsh`; a DSH upgrade below 0.3.0 future-versions may still require an
+  update.
 - Historical sessions before a price change keep the old revision only after the plugin has
   recorded both revisions; the initial snapshot cannot reconstruct unknown past prices.
 
@@ -146,14 +195,16 @@ Plain JavaScript, no build step, no runtime npm dependencies.
 
 ```sh
 node test/prices.test.mjs       # 33 fail-closed parser/fetch tests against real-page fixtures
-node test/host-fold.test.mjs    # 11 host fold + auto-check tests (offline, local HTTP fixture)
+node test/host-fold.test.mjs    # 12 host fold + fork split + auto-check tests (offline, local HTTP fixture)
+node test/client-team.test.mjs  # Agent Teams aggregation, formatting and panel decoration (fake DOM)
 node --check index.js && node --check client.js
 npm pack --dry-run             # inspect the packed file list
 ```
 
 Layout: `index.js` host half (projection + price check), `client.js` browser half (pill + dialog +
-notice), `prices.js` official-page parser/fetcher, `cordis.patch.yml` defaults, `scripts/` manual
-price diagnostics, `test/` suites and fixtures, `locale/` Plugin Manager metadata.
+notice + team-panel decorator), `prices.js` official-page parser/fetcher, `cordis.patch.yml`
+defaults, `scripts/` manual price diagnostics, `test/` suites and fixtures, `locale/` Plugin Manager
+metadata.
 
 ## License
 
