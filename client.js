@@ -59,6 +59,18 @@ window.__ModuleLoader__.load({
     /** While the panel is open, re-read inactive teammates' projections slowly. */
     const TEAM_PROJECTION_REFRESH_MS = 15_000
 
+    /**
+     * Sidebar account balance. The shipped account menu trigger is the only
+     * `button[data-signed-out]`; the reading is a DOM decoration so the account
+     * menu, its dialogs and sign-out flow stay the shipped implementation.
+     */
+    const BALANCE_ATTR = 'data-session-cost-balance'
+    const BALANCE_TRIGGER_SELECTOR = 'button[data-signed-out]'
+    /** Re-find the trigger and repaint (React may replace the footer on layout changes). */
+    const BALANCE_DOM_POLL_MS = 2_000
+    /** Balance changes with spend, not per token; five minutes keeps the Platform read bounded. */
+    const BALANCE_REFRESH_MS = 300_000
+
     async function refreshSessionProjections(sessionId) {
       try {
         const service = clientSessionsService
@@ -408,6 +420,107 @@ window.__ModuleLoader__.load({
     function clearTeamCostNodes(doc) {
       if (doc === null || doc === undefined) return
       for (const node of doc.querySelectorAll(`[${TEAM_MEMBER_COST_ATTR}], [${TEAM_TOTAL_COST_ATTR}]`)) node.remove()
+    }
+
+    /* ------------------------------------------------------------------ */
+    /* 2d. DeepSeek account balance — DSH's own signed-in account platform. */
+    /* ------------------------------------------------------------------ */
+
+    /**
+     * Merge the Platform's normal (top-up) and bonus wallets by currency.
+     * Wallet amounts arrive as decimal strings; a malformed entry is ignored
+     * rather than turned into zero.
+     * @param value - `account.getBalance` ready value (`value` + `bonusWallets`).
+     * @returns one row per currency, CNY first, with normal/bonus/total sums.
+     */
+    function mergeBalanceWallets(value) {
+      const byCurrency = new Map()
+      const add = (wallets, kind) => {
+        if (!Array.isArray(wallets)) return
+        for (const wallet of wallets) {
+          if (wallet === null || typeof wallet !== 'object') continue
+          if (wallet.currency !== 'CNY' && wallet.currency !== 'USD') continue
+          const amount = Number(wallet.balance)
+          if (!Number.isFinite(amount)) continue
+          const row = byCurrency.get(wallet.currency) ?? { currency: wallet.currency, normal: 0, bonus: 0 }
+          row[kind] += amount
+          byCurrency.set(wallet.currency, row)
+        }
+      }
+      add(value?.value, 'normal')
+      add(value?.bonusWallets, 'bonus')
+      const rows = [...byCurrency.values()]
+      for (const row of rows) row.total = row.normal + row.bonus
+      rows.sort((left, right) => (left.currency === 'CNY' ? 0 : 1) - (right.currency === 'CNY' ? 0 : 1))
+      return rows
+    }
+
+    /** Compact account money: `¥12.34`, `<¥0.01`, `$0`, with the sign before the symbol. */
+    function formatBalanceAmount(amount, currency) {
+      const symbol = currencySymbol(currency)
+      if (!Number.isFinite(amount) || amount === 0) return `${symbol}0`
+      const sign = amount < 0 ? '-' : ''
+      const absolute = Math.abs(amount)
+      if (absolute < 0.01) return `${sign}${symbol}${trimmedFixed(absolute, 4)}`
+      return `${sign}${symbol}${absolute.toFixed(2)}`
+    }
+
+    /** Sidebar reading: `余额 ¥12.34 · $0.50`, or null when no wallet exists. */
+    function accountBalanceText(wallets, t) {
+      if (!Array.isArray(wallets) || wallets.length === 0) return null
+      const amount = wallets.map(wallet => formatBalanceAmount(wallet.total, wallet.currency)).join(' · ')
+      return t('balance.label', { amount })
+    }
+
+    /** Hover text with the top-up/bonus split for every currency. */
+    function accountBalanceTitle(wallets, t) {
+      if (!Array.isArray(wallets) || wallets.length === 0) return ''
+      const parts = wallets.map((wallet) => {
+        const total = formatBalanceAmount(wallet.total, wallet.currency)
+        const normal = formatBalanceAmount(wallet.normal, wallet.currency)
+        const bonus = formatBalanceAmount(wallet.bonus, wallet.currency)
+        return `${total} (${t('balance.breakdown', { normal, bonus })})`
+      })
+      return `${t('balance.title')}: ${parts.join(' · ')}`
+    }
+
+    /**
+     * Paint one account menu's balance reading. The shipped trigger is a
+     * `<button data-signed-out>` with the account avatar and name; the reading
+     * becomes its last flex child, right-aligned, and is hidden by CSS in the
+     * collapsed rail and while signed out. Idempotent.
+     * @param trigger - account menu trigger, or null when absent.
+     * @param balance - `{ status, wallets }` from the watcher.
+     * @param t - locale lookup.
+     */
+    function updateAccountBalanceNode(trigger, balance, t) {
+      if (trigger === null || trigger === undefined) return
+      let node = trigger.querySelector(`:scope > [${BALANCE_ATTR}]`)
+      let text = null
+      let title = null
+      if (balance?.status === 'ready') {
+        text = accountBalanceText(balance.wallets, t)
+        title = accountBalanceTitle(balance.wallets, t)
+      } else if (balance?.status === 'failed') {
+        text = t('balance.unavailable')
+        title = t('balance.unavailableTitle')
+      }
+      if (text === null) {
+        if (node !== null) node.remove()
+        if (trigger.hasAttribute('aria-description')) trigger.removeAttribute('aria-description')
+        return
+      }
+      if (node === null) {
+        const doc = trigger.ownerDocument
+        if (doc === null || doc === undefined) return
+        node = doc.createElement('span')
+        node.className = 'scp-account-balance'
+        node.setAttribute(BALANCE_ATTR, '')
+        trigger.appendChild(node)
+      }
+      if (node.textContent !== text) node.textContent = text
+      if (node.title !== title) node.title = title
+      if (trigger.getAttribute('aria-description') !== text) trigger.setAttribute('aria-description', text)
     }
 
     /* ------------------------------------------------------------------ */
@@ -840,6 +953,123 @@ window.__ModuleLoader__.load({
     }
 
     /* ------------------------------------------------------------------ */
+    /* 6c. Sidebar account balance — decorate the shipped account trigger.  */
+    /* ------------------------------------------------------------------ */
+
+    /**
+     * Headless footer watch: reads the signed-in DeepSeek account balance from
+     * DSH's account Remote and paints it into the shipped account menu trigger.
+     * Renders nothing itself; the account menu remains the shipped component.
+     * @param props - locale lookup plus the injected balance reader.
+     */
+    function AccountBalanceWatcher({ t, readBalance }) {
+      const [balance, setBalance] = useState({ status: 'idle' })
+      const latest = useRef({ balance, t })
+      latest.current = { balance, t }
+      const paintRef = useRef(null)
+      paintRef.current = () => {
+        updateAccountBalanceNode(
+          document.querySelector(BALANCE_TRIGGER_SELECTOR),
+          latest.current.balance,
+          latest.current.t,
+        )
+      }
+
+      useEffect(() => {
+        let disposed = false
+        let trigger = null
+        let triggerObserver = null
+        let inFlight = false
+        let signedOut = null
+
+        const findTrigger = () => document.querySelector(BALANCE_TRIGGER_SELECTOR)
+        const isSignedOut = () => trigger !== null && trigger.getAttribute('data-signed-out') === 'true'
+        const refresh = async () => {
+          if (disposed || inFlight) return
+          if (isSignedOut()) {
+            setBalance({ status: 'signed-out' })
+            return
+          }
+          inFlight = true
+          try {
+            const value = await readBalance()
+            if (disposed) return
+            if (value === null) {
+              setBalance({ status: 'signed-out' })
+              return
+            }
+            if (value.status === 'ready') {
+              const wallets = mergeBalanceWallets(value)
+              setBalance(wallets.length === 0 ? { status: 'failed' } : { status: 'ready', wallets })
+            } else {
+              setBalance({ status: 'failed' })
+            }
+          } catch (_balanceReadFailed) {
+            if (!disposed) setBalance({ status: 'failed' })
+          } finally {
+            inFlight = false
+          }
+        }
+        const syncSignedOut = () => {
+          const next = isSignedOut()
+          if (next === signedOut) return
+          signedOut = next
+          if (next) setBalance({ status: 'signed-out' })
+          else void refresh()
+        }
+        const attach = () => {
+          const next = findTrigger()
+          if (next === trigger) {
+            paintRef.current()
+            return
+          }
+          triggerObserver?.disconnect()
+          triggerObserver = null
+          trigger = next
+          if (trigger !== null) {
+            triggerObserver = new MutationObserver(() => {
+              paintRef.current()
+              syncSignedOut()
+            })
+            triggerObserver.observe(trigger, {
+              childList: true,
+              subtree: true,
+              attributes: true,
+              attributeFilter: ['data-signed-out', 'data-collapsed'],
+            })
+          }
+          signedOut = null
+          syncSignedOut()
+          paintRef.current()
+        }
+        const domPoll = window.setInterval(attach, BALANCE_DOM_POLL_MS)
+        const balanceRefresh = window.setInterval(() => {
+          if (document.visibilityState === 'visible' && !isSignedOut()) void refresh()
+        }, BALANCE_REFRESH_MS)
+        const onVisible = () => {
+          if (document.visibilityState !== 'visible') return
+          attach()
+          if (!isSignedOut()) void refresh()
+        }
+        document.addEventListener('visibilitychange', onVisible)
+        window.addEventListener('focus', onVisible)
+        attach()
+        return () => {
+          disposed = true
+          window.clearInterval(domPoll)
+          window.clearInterval(balanceRefresh)
+          triggerObserver?.disconnect()
+          document.removeEventListener('visibilitychange', onVisible)
+          window.removeEventListener('focus', onVisible)
+          updateAccountBalanceNode(trigger, { status: 'idle' }, latest.current.t)
+        }
+      }, [readBalance])
+
+      useEffect(() => { paintRef.current?.() }, [balance, t])
+      return null
+    }
+
+    /* ------------------------------------------------------------------ */
     /* 7. Performance-usage detail mode (best effort).                     */
     /*    Profile ships `performanceUsage: detailed`; when the client       */
     /*    settings service is reachable we follow the live preference.     */
@@ -1116,6 +1346,25 @@ button.scp-pill[aria-expanded='true'] {
   font-variant-numeric: tabular-nums;
   white-space: nowrap;
 }
+/* Sidebar account menu: the reading rides at the right edge of the shipped
+   trigger; the rail and signed-out states keep it hidden. */
+.scp-account-balance {
+  flex: none;
+  max-width: 62%;
+  margin-left: auto;
+  padding-left: 8px;
+  overflow: hidden;
+  color: var(--dsw-alias-label-tertiary);
+  font-size: 12px;
+  line-height: 16px;
+  font-variant-numeric: tabular-nums;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+button[data-collapsed='true'] .scp-account-balance,
+button[data-signed-out='true'] .scp-account-balance {
+  display: none;
+}
 /* Frame-wide dismissible notice: the overlay layer is click-through, so the
    card re-enables pointer events for its own box. */
 .scp-notice {
@@ -1206,6 +1455,11 @@ button.scp-pill[aria-expanded='true'] {
       'team.totalTitle': '全部成员累计 API 消费（估算）',
       'team.memberTitle': '{name} 的累计 API 消费（估算）',
       'team.inheritedHint': '（另有 {total} 为从 Lead 继承的历史，不计入团队合计）',
+      'balance.label': '余额 {amount}',
+      'balance.title': 'DeepSeek 余额',
+      'balance.breakdown': '充值 {normal}、赠金 {bonus}',
+      'balance.unavailable': '余额 —',
+      'balance.unavailableTitle': 'DeepSeek 余额暂不可用，稍后自动重试',
     }
 
     const en = {
@@ -1238,6 +1492,11 @@ button.scp-pill[aria-expanded='true'] {
       'team.totalTitle': 'Cumulative API cost of all members (estimate)',
       'team.memberTitle': '{name} cumulative API cost (estimate)',
       'team.inheritedHint': '({total} inherited from the Lead is excluded from the team total)',
+      'balance.label': 'Balance {amount}',
+      'balance.title': 'DeepSeek balance',
+      'balance.breakdown': 'top-up {normal}, bonus {bonus}',
+      'balance.unavailable': 'Balance —',
+      'balance.unavailableTitle': 'DeepSeek balance is temporarily unavailable; retrying automatically',
     }
 
     /* ------------------------------------------------------------------ */
@@ -1281,6 +1540,37 @@ button.scp-pill[aria-expanded='true'] {
         order: -19, // right after the shipped agent-team action (order -20)
         locale: NS,
       }, TeamCostCell))
+      // Sidebar account balance: decorate the shipped account trigger when this
+      // DSH composition exposes the signed-in account Remote. The feature is
+      // optional so the composer pill still loads on compositions without it.
+      ctx.inject(['remote', 'remote.account'], (accountScope) => {
+        const readBalance = async () => {
+          try {
+            const account = accountScope.remote?.account
+            if (account === undefined) return { status: 'failed' }
+            const boot = globalThis.__DSH_BOOT__
+            const version = typeof boot?.release?.version === 'string' && boot.release.version.length > 0
+              ? boot.release.version
+              : 'unknown'
+            const result = await account.getBalance({
+              version,
+              locale: ctx.locale.getSnapshot().active,
+              timezoneOffsetSeconds: -new Date().getTimezoneOffset() * 60,
+            })
+            if (result === null || result === undefined || result.ok !== true) return { status: 'failed' }
+            return result.value
+          } catch (_balanceUnavailable) {
+            return { status: 'failed' }
+          }
+        }
+        ctx.slots.inject('sidebar.footer.action', () => ctx.slots.register({
+          name: 'sidebar.footer.action',
+          id: 'session-cost-balance',
+          order: 50,
+          locale: NS,
+          inject: () => ({ readBalance }),
+        }, AccountBalanceWatcher))
+      }, 'session-cost: account balance')
       // Frame-wide, non-blocking notice when the bounded official-page check
       // failed; a fresh id keeps it additive beside the shipped overlays.
       ctx.slots.inject('shell.overlay', () => ctx.slots.register({
@@ -1306,6 +1596,11 @@ button.scp-pill[aria-expanded='true'] {
         teamTotalTitle,
         updateTeamCostNodes,
         clearTeamCostNodes,
+        mergeBalanceWallets,
+        formatBalanceAmount,
+        accountBalanceText,
+        accountBalanceTitle,
+        updateAccountBalanceNode,
       }
     }
     return exports

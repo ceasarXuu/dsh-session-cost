@@ -1,8 +1,8 @@
 # dsh-session-cost
 
-**Session API cost inside the DSH composer usage line — and inside the Agent Teams roster.** It
-keeps the official token count and cache-hit reading byte-identical to the shipped pill and inserts
-the money segment between them:
+**Session API cost inside the DSH composer usage line, the Agent Teams roster, and the signed-in
+DeepSeek account balance in the sidebar.** It keeps the official token count and cache-hit reading
+byte-identical to the shipped pill and inserts the money segment between them:
 
 ```
 ⟳ 3 turns 237 steps · 205 tok/s    🗄 122K tok · ¥0.003 · 缓存命中 98%    ◔ 47%
@@ -35,16 +35,29 @@ excluded from the sum and the total is marked `≈`; hovering a reading shows th
 price-table caveat. The integration targets the 0.2.1-rc.5 experimental panel; a DSH build without
 that panel simply never shows the decoration.
 
+### Sidebar account balance
+
+The bottom-left account row (avatar + name) also shows the signed-in DeepSeek account's wallet
+balance at its right edge, e.g. `余额 ¥111.21`. The amount is the **recharge wallet + bonus wallet**
+total per currency; hovering it shows the top-up/bonus split. It is read through DSH's own account
+Remote (`account.getBalance`), so the plugin never reads, stores or sends an API key. The sidebar
+reading hides in the collapsed rail and while signed out, refreshes on mount, when the window becomes
+visible or focused again, and otherwise at most every 5 minutes, and shows `余额 —` (with a retry
+note) when the wallet query fails. A DSH composition without the signed-in account Remote simply keeps the feature off; the
+composer pill and Agent Teams decoration are unaffected.
+
 > This is a third-party plugin. It is not an official DeepSeek / DeepSeek Harness component.
 > The amount is a **token cost** (official billed tokens × official published prices) — a lower
-> bound of real spend, not an official invoice.
+> bound of real spend, not an official invoice. The sidebar balance is a wallet snapshot from the
+> signed-in account, not a bill.
 
 ## Install
 
 Requires **DSH 0.2.1-rc.2 or newer (below 0.3.0)** with the Web/Desktop surface, and Node ≥ 22.
-Verified on DSH 0.2.1-rc.5, including a live run with the experimental Agent Teams profile; the
-DSH 0.2.1-rc.2 API surface was checked statically (projection wire views, slot shadowing, locale
-registration, session-list projections).
+Verified live on DSH 0.2.2-rc.1 (sidebar balance and account menu, Agent Teams panel decoration) and
+on DSH 0.2.1-rc.5 (composer line, Agent Teams panel, sidebar balance); the DSH 0.2.1-rc.2 API surface
+was checked statically (projection wire views, slot shadowing, locale registration, session-list
+projections).
 
 - **Plugin Manager:** Plugins → Add → `@ceasarxuu/dsh-session-cost` → install and keep it enabled.
 - **CLI:** `dsh plugin --profile <profile> add @ceasarxuu/dsh-session-cost`
@@ -62,6 +75,7 @@ unchanged. `plugin_manager` `install_bundle` accepts the same package name/spec.
 | `缓存命中 98%` | the official cache-hit rule (unchanged, including the never-round-to-100% behavior) |
 | team card `¥0.18` | this plugin: that member Session's child-owned `sessionCost` portion |
 | team heading `合计 ¥0.42` | this plugin: Σ child-owned cost over `agentTeam.members` (Lead included) |
+| account row `余额 ¥111.21` | this plugin: the signed-in account's recharge + bonus wallets via DSH `account.getBalance` |
 
 The money segment hides itself when no price is configured for the route (for example a
 third-party provider); the dialog then says “未配置价格” instead of inventing a number. A gateway
@@ -96,6 +110,12 @@ official `tokenUsage` unit folds (`assistant/message` / `assistant/attempt` usag
 The result is session-cumulative over the whole durable log, including fork-inherited prefixes. The
 wire view also carries the child-owned split (`ownCostNano` / `ownUnpricedTokens`), which counts only
 events at or past the fork's inherited cut (`init(header, inheritedEventCount)`).
+
+The sidebar balance is not derived from the session log at all: it calls the client-side
+`ctx.remote.account.getBalance({ version, locale, timezoneOffsetSeconds })` Remote that DSH already
+mounts for the account menu and Settings → Account. The request carries only the client-version,
+locale and timezone headers the shipped account UI sends; no token cost, price table or session
+identifier is involved.
 
 For an Agent Team, every member (the Lead included) is its own durable Session with its own log, so
 the team total is the sum of every member's child-owned cost. A forked teammate's inherited prefix is
@@ -157,9 +177,12 @@ Routes resolve by `provider/model`, then `*/model`, then bare `model`.
 
 - One HTTPS GET to `api-docs.deepseek.com` at most once per 7 days. No API keys, no session content
   and no prompts are sent.
+- The sidebar balance asks DSH's signed-in account service for the wallet summary on mount, when the
+  window becomes visible/focused, and otherwise at most once per 5 minutes while the window is
+  visible; the plugin never sees the account grant or an API key.
 - No telemetry.
 - Local state is limited to the check timestamps, auto-detected price revisions and a
-  localStorage dismissal key in the Web UI.
+  localStorage dismissal key in the Web UI. The balance reading itself lives only in page memory.
 - All numbers are computed locally from your session log and the price table.
 
 ## Known limits
@@ -182,10 +205,13 @@ Routes resolve by `provider/model`, then `*/model`, then bare `model`.
   plugin attaches its two cost nodes to the panel's roster section (`[data-team-panel]`). A DSH
   release that renames that attribute or restructures the roster needs a plugin update; the panel's
   own roster, task board and teammate navigation are untouched, and the composer pill is unaffected.
+- **Sidebar balance needs the signed-in account Remote.** API-key-only setups or a composition
+  without `remote.account` show no balance; the rest of the plugin still works. A wallet query that
+  fails keeps the placeholder visible until a later successful refresh.
 - **DSH internal APIs:** this plugin relies on session projections, slot shadowing, locale
-  registration, session-list projections and the Agent Teams panel's DOM contract. It is
-  version-gated by `engines.dsh`; a DSH upgrade below 0.3.0 future-versions may still require an
-  update.
+  registration, session-list projections, the Agent Teams panel's DOM contract and the account
+  menu trigger's `data-signed-out`/`data-collapsed` DOM attributes. It is version-gated by
+  `engines.dsh`; a DSH upgrade below 0.3.0 future-versions may still require an update.
 - Historical sessions before a price change keep the old revision only after the plugin has
   recorded both revisions; the initial snapshot cannot reconstruct unknown past prices.
 
@@ -197,14 +223,15 @@ Plain JavaScript, no build step, no runtime npm dependencies.
 node test/prices.test.mjs       # 33 fail-closed parser/fetch tests against real-page fixtures
 node test/host-fold.test.mjs    # 12 host fold + fork split + auto-check tests (offline, local HTTP fixture)
 node test/client-team.test.mjs  # Agent Teams aggregation, formatting and panel decoration (fake DOM)
+node test/client-balance.test.mjs # wallet merge/formatting and account-row decoration (fake DOM)
 node --check index.js && node --check client.js
 npm pack --dry-run             # inspect the packed file list
 ```
 
 Layout: `index.js` host half (projection + price check), `client.js` browser half (pill + dialog +
-notice + team-panel decorator), `prices.js` official-page parser/fetcher, `cordis.patch.yml`
-defaults, `scripts/` manual price diagnostics, `test/` suites and fixtures, `locale/` Plugin Manager
-metadata.
+notice + team-panel and account-balance decorators), `prices.js` official-page parser/fetcher,
+`cordis.patch.yml` defaults, `scripts/` manual price diagnostics, `test/` suites and fixtures,
+`locale/` Plugin Manager metadata.
 
 ## License
 

@@ -20,6 +20,7 @@ npm version patch --no-git-tag-version     # or minor/major
 node test/prices.test.mjs
 node test/host-fold.test.mjs
 node test/client-team.test.mjs
+node test/client-balance.test.mjs
 node --check index.js && node --check client.js
 npm pack --dry-run                         # confirm files, size, and that no private data is included
 
@@ -41,6 +42,8 @@ Post-publish checks:
 - On a profile that includes `@deepseek-ai/dsh-experimental-agent-team-profile`, open a team session:
   every roster card shows an amount and the `成员 N` heading shows the team total; the panel's
   roster/task/navigation behavior is unchanged.
+- Sign in to a DeepSeek account: the sidebar account row shows the wallet reading at its right edge,
+  hover shows the top-up/bonus split, the collapsed rail hides it, and the account menu still opens.
 - Check the Plugin Manager card: localized title/description (`locale/en.json`, `locale/zh.json`) and
   the icon.
 - If this release changes `engine.dsh`, re-run the install smoke test on the oldest supported DSH
@@ -52,9 +55,10 @@ Post-publish checks:
   running the plugin on the older version; narrow it when a DSH API change breaks the fold, the
   composer slot, locale registration, or session-list projections.
 - The plugin intentionally uses only public DSH runtime seams (session projections with a wire view,
-  slot shadowing, locale registration, session-list projections) plus the Agent Teams panel's
-  `data-team-panel` DOM contract. If an upstream change removes one, bump the minor version and state
-  the tested DSH version in the README.
+  slot shadowing, locale registration, session-list projections, the account Remote) plus the Agent
+  Teams panel's `data-team-panel` and the account menu trigger's `data-signed-out`/`data-collapsed`
+  DOM contracts. If an upstream change removes one, bump the minor version and state the tested DSH
+  version in the README.
 - On every DSH bump, re-run the Agent Teams panel check: open a team session, confirm the per-card
   amounts and the heading total still render, and confirm the panel's roster, task board and
   teammate navigation still work. A changed roster markup needs a plugin update even when the

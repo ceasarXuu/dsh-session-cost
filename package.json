@@ -1,7 +1,7 @@
 {
   "name": "@ceasarxuu/dsh-session-cost",
-  "version": "1.2.0",
-  "description": "Session API cost inside the DSH composer usage line and the Agent Teams roster: official token count, a ¥/$ amount from dated official prices (peak/off-peak aware), every teammate's own cumulative amount plus the team total, and a bounded 7-day price-table auto-check.",
+  "version": "1.3.0",
+  "description": "Session API cost inside the DSH composer usage line and the Agent Teams roster, plus the signed-in DeepSeek account balance in the sidebar: official token count, a ¥/$ amount from dated official prices, every teammate's own cumulative amount plus the team total, a bounded price-table auto-check, and a wallet reading refreshed through DSH's account service.",
   "type": "module",
   "license": "MIT",
   "author": "ceasarXuu",
@@ -24,7 +24,9 @@
     "pricing",
     "agent-team",
     "subagent",
-    "team"
+    "team",
+    "balance",
+    "account"
   ],
   "engines": {
     "dsh": ">=0.2.1-rc.2 <0.3.0",

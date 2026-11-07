@@ -1,7 +1,8 @@
 # dsh-session-cost（会话 API 消费）
 
-在 **DSH 输入框下方的官方用量行里插入当前会话的 API 消费金额**，并让 **智能体团队（Agent Teams）**
-面板显示每个成员的累计消费；同时保持官方 token 数与缓存命中逐字不变：
+在 **DSH 输入框下方的官方用量行里插入当前会话的 API 消费金额**，让 **智能体团队（Agent Teams）**
+面板显示每个成员的累计消费，并在**左下角账号旁显示已登录 DeepSeek 账号的余额**；同时保持官方 token
+数与缓存命中逐字不变：
 
 ```
 ⟳ 3 轮 237 步 · 205 tok/s    🗄 122K tok · ¥0.003 · 缓存命中 98%    ◔ 47%
@@ -29,14 +30,23 @@ Session 服务刷新全部成员的投影。某成员尚无读数或币种不一
 可看到精确金额与价目检查提示。该集成针对 0.2.1-rc.5 的实验性面板；没有该面板的 DSH 构建上装饰逻辑
 不会生效。
 
+### 侧栏账号余额
+
+左下角账号行（头像 + 姓名）右侧会显示已登录 DeepSeek 账号的余额，例如 `余额 ¥111.21`。金额是各币种
+**充值余额 + 赠金余额**的合计，悬停可看到充值/赠金拆分。数据来自 DSH 自带的账号 Remote
+（`account.getBalance`），插件不读取、不保存、不发送 API key。侧栏收起时和未登录时隐藏；打开页面、
+窗口重新可见时以及最多每 5 分钟刷新一次；钱包查询失败时显示 `余额 —` 并稍后重试。没有已登录账号
+Remote 的 DSH 组合上该功能自动不启用，不影响输入框胶囊与团队面板。
+
 > 这是第三方插件，不是 DeepSeek / DeepSeek Harness 官方组件。金额是「官方计费 token × 官方公开价格」
-> 的**成本估算**，是实际账单的下限，不是官方账单。
+> 的**成本估算**，是实际账单的下限，不是官方账单。侧栏余额是已登录账号的钱包快照，也不是账单。
 
 ## 安装
 
-要求 **DSH 0.2.1-rc.2 及以上（低于 0.3.0）** 且使用 Web/Desktop 界面，Node ≥ 22。已在 DSH 0.2.1-rc.5
-实际运行验证（含实验性 Agent Teams profile 的完整面板实测）；对公开的 0.2.1-rc.2 只做了 API 面静态
-核对（投影 wire 视图、slot 阴影、locale 注册、会话列表投影）。
+要求 **DSH 0.2.1-rc.2 及以上（低于 0.3.0）** 且使用 Web/Desktop 界面，Node ≥ 22。已在 DSH 0.2.2-rc.1
+实际运行验证（账号菜单与侧栏余额、实验性 Agent Teams 面板装饰），并在 DSH 0.2.1-rc.5 验证输入框
+胶囊、团队面板与余额；对公开的 0.2.1-rc.2 只做了 API 面静态核对（投影 wire 视图、slot 阴影、locale
+注册、会话列表投影）。
 
 - **Plugin Manager**：Plugins → Add → 输入 `@ceasarxuu/dsh-session-cost`，安装并保持启用。
 - **CLI**：`dsh plugin --profile <profile> add @ceasarxuu/dsh-session-cost`
@@ -53,6 +63,7 @@ Session 服务刷新全部成员的投影。某成员尚无读数或币种不一
 | `缓存命中 98%` | 官方缓存命中规则（原样，含“不把部分命中四舍五入成 100%”逻辑） |
 | 团队卡片 `¥0.18` | 本插件：该成员 Session 自身产生的 `sessionCost` 部分 |
 | 团队标题 `合计 ¥0.42` | 本插件：`agentTeam.members` 全部成员（含 Lead）自身消费之和 |
+| 账号行 `余额 ¥111.21` | 本插件：已登录账号的充值 + 赠金钱包（经 DSH `account.getBalance`） |
 
 没有配置价格的模型路由（如第三方 provider）不显示金额段，弹窗显示“未配置价格”，不会瞎猜。若网关给
 官方模型起了别名（例如官方 API 是 `deepseek-flash`，而路由里是 `opencode-go/deepseek-v4.1-flash`），
@@ -77,6 +88,11 @@ Session 服务刷新全部成员的投影。某成员尚无读数或币种不一
 
   `reasoningTokens` 已包含在 `outputTokens` 内；`totalTokens` 不使用（各桶互斥）。结果是整个持久化日志
   的会话累计值，包含 fork 继承的前缀。
+
+侧栏余额与 token 日志无关：它调用 DSH 已经为账号菜单和设置→账号提供的
+`ctx.remote.account.getBalance({ version, locale, timezoneOffsetSeconds })`，只携带官方账号 UI 同样的
+客户端版本/语言/时区头，不涉及 token 成本、价目表或会话标识。合并逻辑是同一币种的普通钱包与赠金钱包
+相加；多币种按 CNY、USD 顺序展示。
 
 ## 价目更新与自动检查
 
@@ -120,9 +136,12 @@ node scripts/refresh-prices.mjs   # 只读：抓取中英文定价页、与配�
 ## 隐私与网络
 
 - 最多每 7 天对 `api-docs.deepseek.com` 发一次 HTTPS GET；不发送 API key、会话内容或 prompt。
+- 侧栏余额在打开页面、窗口重新可见/获得焦点时，以及窗口可见时最多每 5 分钟，向 DSH 已登录账号服务
+  请求一次钱包摘要；插件本身接触不到账号凭据或 API key。
 - 无任何遥测。
-- 本地只保存检查时间、自动检测到的价格修订，以及 Web UI 里一个 localStorage 忽略键。
-- 所有金额均由你的会话日志和价目表在本地计算。
+- 本地只保存检查时间、自动检测到的价格修订，以及 Web UI 里一个 localStorage 忽略键；余额读数只存在
+  于页面内存。
+- 所有成本金额均由你的会话日志和价目表在本地计算。
 
 ## 已知边界
 
@@ -138,8 +157,11 @@ node scripts/refresh-prices.mjs   # 只读：抓取中英文定价页、与配�
 - **团队面板采用 DOM 就地装饰**：官方团队面板没有子 slot，插件把两个金额节点挂到面板成员区
   （`[data-team-panel]`）。若 DSH 改动该属性或人员卡片结构，需要更新插件；面板自身的成员、任务板与
   跳转行为不受影响，输入框胶囊也与本功能互不影响。
-- **依赖 DSH 内部 API**：会话投影、slot 阴影、locale 注册、会话列表投影，以及团队面板的 DOM 约定；
-  已用 `engines.dsh` 版本收口，DSH 升级仍可能要求插件更新。
+- **侧栏余额需要已登录账号 Remote**：只用 API key、或组合里没有 `remote.account` 时不显示余额，其余
+  功能照常；钱包查询失败会保留占位符直到下次成功刷新。
+- **依赖 DSH 内部 API**：会话投影、slot 阴影、locale 注册、会话列表投影、团队面板 DOM 约定，以及账号
+  菜单触发器的 `data-signed-out`/`data-collapsed` DOM 属性；已用 `engines.dsh` 版本收口，DSH 升级仍
+  可能要求插件更新。
 - 初始快照之前的历史会话无法重建未知的旧价格。
 
 ## 开发
@@ -150,6 +172,7 @@ node scripts/refresh-prices.mjs   # 只读：抓取中英文定价页、与配�
 node test/prices.test.mjs       # 33 个 fail-closed 解析/抓取测试（真实页面 fixture）
 node test/host-fold.test.mjs    # 12 个宿主折叠 + fork 拆分 + 自动检查测试（离线，本地 HTTP fixture）
 node test/client-team.test.mjs  # 团队合计、格式化与面板装饰测试（假 DOM，离线）
+node test/client-balance.test.mjs # 钱包合并/格式化与账号行装饰测试（假 DOM，离线）
 node --check index.js && node --check client.js
 npm pack --dry-run             # 检查实际打包文件清单
 ```
